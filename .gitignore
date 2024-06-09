@@ -1,0 +1,10 @@
+*.so
+
+mr-*
+
+mrcoordinator
+
+mrsequential
+
+mrworker
+
