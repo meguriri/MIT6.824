@@ -24,18 +24,6 @@ func Worker(mapf func(string, string) []KeyValue,
 	workerStatus := true
 	for workerStatus {
 		task := getTask()
-		//sleep
-		//rand
-		//r := rand.New(rand.NewSource(time.Now().UnixNano()))
-		//m := r.Intn(100)
-		//if m%2 == 0 {
-		//	time.Sleep(time.Second * 6)
-		//	fmt.Printf("task %d is crash\n", task.TaskId)
-		//	continue
-		//} else {
-		//	time.Sleep(time.Second * 3)
-		//}
-		//
 		switch task.TaskStage {
 		case Map:
 			mapping(&task, mapf)
@@ -47,7 +35,6 @@ func Worker(mapf func(string, string) []KeyValue,
 			workerStatus = false
 		}
 	}
-	//log.Println("worker is done")
 }
 
 // rpc function
@@ -55,9 +42,7 @@ func getTask() Task {
 	//GetTask RPC
 	args := GetTaskArgs{}
 	reply := GetTaskReply{}
-	//log.Println("get task ...")
 	call("Coordinator.AssignTask", &args, &reply)
-	//log.Println("get task ok:", reply.Task.TaskId, reply.Task.TaskStage)
 	return reply.Task
 }
 
@@ -180,7 +165,9 @@ func ReadFromTempFile(files []string) []KeyValue {
 // usually returns true.
 // returns false if something goes wrong.
 func call(rpcname string, args interface{}, reply interface{}) bool {
-	c, err := rpc.DialHTTP("tcp", "127.0.0.1"+":1234")
+	sockname := coordinatorSock()
+	//c, err := rpc.DialHTTP("tcp", "127.0.0.1"+":1234")
+	c, err := rpc.DialHTTP("unix", sockname)
 	if err != nil {
 		log.Fatal("dialing:", err)
 	}
@@ -189,7 +176,7 @@ func call(rpcname string, args interface{}, reply interface{}) bool {
 	if err == nil {
 		return true
 	}
-	fmt.Println("call", rpcname, "error: ", err.Error())
+	fmt.Println(err)
 	return false
 }
 
