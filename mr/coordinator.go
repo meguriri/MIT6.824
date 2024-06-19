@@ -1,7 +1,6 @@
 package mr
 
 import (
-	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -20,7 +19,7 @@ type Coordinator struct {
 	files         []string
 	intermediates [][]string
 	outFile       []string
-	lock          sync.Mutex
+	lock          sync.RWMutex
 }
 
 // create a Coordinator.
@@ -37,12 +36,36 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 		files:         files,
 		intermediates: make([][]string, nReduce),
 		outFile:       make([]string, nReduce),
-		lock:          sync.Mutex{},
+		lock:          sync.RWMutex{},
 	}
 	c.CreateMapTask()
-	//go c.CheckCrash()
+	go c.CheckCrash()
 	c.server()
 	return &c
+}
+
+// CheckCrash 检测crash TODO
+func (c *Coordinator) CheckCrash() {
+	for c.status != Exit {
+		//fmt.Println("-------Check Crash-------")
+		c.lock.Lock()
+		for i, _ := range c.taskIndex {
+			//fmt.Printf("task[%v]:%v, ", c.taskIndex[i].TaskId, c.taskIndex[i].TaskStage)
+			if ((c.taskIndex[i].TaskStage == Map) || (c.taskIndex[i].TaskStage == Reduce)) && (c.taskIndex[i].StartTime != time.Time{}) && (time.Since(c.taskIndex[i].StartTime).Seconds() > 10) {
+				//fmt.Printf("------check crash task %d is crash------\n", c.taskIndex[i].TaskId)
+				c.taskIndex[i].StartTime = time.Time{}
+				if c.status == Map {
+					c.taskIndex[i].TaskStage = Map
+				} else if c.status == Reduce {
+					c.taskIndex[i].TaskStage = Reduce
+				}
+				c.taskList <- c.taskIndex[i]
+			}
+		}
+		c.lock.Unlock()
+		//fmt.Println("-------Check Done-------")
+		time.Sleep(time.Second * 2)
+	}
 }
 
 // Your code here -- RPC handlers for the worker to call.
@@ -53,6 +76,7 @@ func (c *Coordinator) AssignTask(args *GetTaskArgs, reply *GetTaskReply) error {
 		reply.Task = *<-c.taskList
 		//check time
 		c.taskIndex[reply.Task.TaskId].StartTime = time.Now()
+		//fmt.Printf("Assign task %d start time %v \n", reply.Task.TaskId, time.Now())
 		//
 	} else {
 		if c.status == Exit {
@@ -78,24 +102,19 @@ func (c *Coordinator) CompleteTask(args *CompleteTaskArgs, reply *CompleteTaskRe
 	c.lock.Lock()
 	defer c.lock.Unlock()
 	id, stage, files := args.TaskId, args.Stage, args.FilePaths
+	//check task is already done
 	if stage != c.status || c.taskIndex[id].TaskStage == MapComplete || c.taskIndex[id].TaskStage == ReduceComplete {
-		fmt.Printf("task %d is already done\n", id)
+		//log.Printf("task %d is already done\n", id)
 		return nil
 	}
 	if stage == Map {
-		//
-		//c.okSignal <- id
-		//
 		c.taskIndex[id].TaskStage = MapComplete
-		fmt.Printf("Map task %d is ok,during %d second\n", id, time.Now().Sub(c.taskIndex[id].StartTime))
+		//log.Printf("Map task %d is ok,during %f second\n", id, time.Since(c.taskIndex[id].StartTime).Seconds())
 		for i, v := range files {
 			c.intermediates[i] = append(c.intermediates[i], v)
 		}
 	} else if stage == Reduce {
-		//
-		//c.okSignal <- id
-		//
-		fmt.Printf("Reduce task %d is ok,during %d second\n", id, time.Now().Sub(c.taskIndex[id].StartTime))
+		//log.Printf("Reduce task %d is ok,during %f second\n", id, time.Since(c.taskIndex[id].StartTime).Seconds())
 		c.taskIndex[id].TaskStage = ReduceComplete
 		c.outFile[id] = files[0]
 	}
@@ -105,15 +124,13 @@ func (c *Coordinator) CompleteTask(args *CompleteTaskArgs, reply *CompleteTaskRe
 
 // 可以改进
 func (c *Coordinator) CheckStage(stage int) {
-	c.lock.Lock()
-	defer c.lock.Unlock()
 	if stage == Map && c.isAllComplete() {
-		fmt.Println("Change to Reduce stages")
+		//fmt.Println("Change to Reduce stages")
 		c.status = Reduce
 		c.CreateReduceTask()
-		fmt.Println("CreateReduceTask ok")
+		//fmt.Println("CreateReduceTask ok")
 	} else if stage == Reduce && c.isAllComplete() {
-		fmt.Println("All complete")
+		//fmt.Println("All complete")
 		c.status = Exit
 	}
 }
@@ -136,7 +153,7 @@ func (c *Coordinator) Done() bool {
 	c.lock.Lock()
 	defer c.lock.Unlock()
 	if c.status == Exit {
-		//??
+		// TODO
 		time.Sleep(time.Second * 5)
 		//
 		return true
@@ -163,7 +180,6 @@ func (c *Coordinator) CreateMapTask() {
 }
 
 func (c *Coordinator) CreateReduceTask() {
-	fmt.Println("Start CreateReduceTask")
 	c.taskIndex = make(map[int]*Task)
 	for i, files := range c.intermediates {
 		task := Task{
@@ -177,27 +193,18 @@ func (c *Coordinator) CreateReduceTask() {
 		c.taskList <- &task
 		c.taskIndex[i] = &task
 	}
-	fmt.Println("end CreateReduceTask")
 }
 
 func (c *Coordinator) isAllComplete() bool {
-	for _, v := range c.taskIndex {
-		if v.TaskStage == Map || v.TaskStage == Reduce {
+	c.lock.Lock()
+	defer c.lock.Unlock()
+	for i, _ := range c.taskIndex {
+		if c.taskIndex[i].TaskStage == Map || c.taskIndex[i].TaskStage == Reduce {
+
 			return false
 		}
 	}
 	return true
-}
-
-// CheckCrash 检测crash TODO
-func (c *Coordinator) CheckCrash() {
-	// for {
-	// 	select {
-	// 	case id := <-c.okSignal:
-
-	// 	}
-	// 	case time.D
-	// }
 }
 
 func max(a, b int) int {

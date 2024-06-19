@@ -28,11 +28,12 @@ func Worker(mapf func(string, string) []KeyValue,
 		//rand
 		//r := rand.New(rand.NewSource(time.Now().UnixNano()))
 		//m := r.Intn(100)
-		////
 		//if m%2 == 0 {
-		//	time.Sleep(time.Second * 8)
+		//	time.Sleep(time.Second * 6)
+		//	fmt.Printf("task %d is crash\n", task.TaskId)
+		//	continue
 		//} else {
-		//	time.Sleep(time.Second * 2)
+		//	time.Sleep(time.Second * 3)
 		//}
 		//
 		switch task.TaskStage {
@@ -46,7 +47,7 @@ func Worker(mapf func(string, string) []KeyValue,
 			workerStatus = false
 		}
 	}
-	log.Println("worker is done")
+	//log.Println("worker is done")
 }
 
 // rpc function
@@ -54,8 +55,9 @@ func getTask() Task {
 	//GetTask RPC
 	args := GetTaskArgs{}
 	reply := GetTaskReply{}
+	//log.Println("get task ...")
 	call("Coordinator.AssignTask", &args, &reply)
-	log.Println("get task:", reply.Task.TaskId, reply.Task.TaskStage)
+	//log.Println("get task ok:", reply.Task.TaskId, reply.Task.TaskStage)
 	return reply.Task
 }
 
@@ -106,9 +108,6 @@ func reducing(t *Task, reducef func(string, []string) string) {
 				rep = append(rep, KeyValue{last.Key, reducef(last.Key, val)})
 				last = kv
 				val = make([]string, 0)
-				if kv.Key == "A" {
-					fmt.Println("rep", rep)
-				}
 			}
 			val = append(val, kv.Value)
 		}
