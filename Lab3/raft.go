@@ -18,6 +18,7 @@ package raft
 //
 
 import (
+	"fmt"
 	//	"bytes"
 	"math/rand"
 	"sync"
@@ -68,11 +69,14 @@ type Raft struct {
 	// Your data here (3A, 3B, 3C).
 
 	//3A
-	id       int  //节点的id
-	maxTerm  int  //节点保存的最大term值
-	state    int  //节点当前的状态
-	leaderId int  //当前leader的id
-	isVoted  bool //当前节点是否已经投票
+	id       int         //节点的id
+	maxTerm  int         //节点保存的最大term值
+	state    int         //节点当前的状态
+	leaderId int         //当前leader的id
+	isVoted  bool        //当前节点是否已经投票
+	votes    int         //选票数
+	timer    *time.Timer //计时器
+	hb       chan struct{}
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
 
@@ -81,7 +85,6 @@ type Raft struct {
 // return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
-
 	var term int
 	var isleader bool
 	// Your code here (3A)
@@ -138,11 +141,30 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 
 }
 
-// 心跳
+// Leader给follower发送复制日志和用于心跳
 type AppendEntriesArgs struct {
+	//3A
+	Term     int //leader's term
+	LeaderId int
+	//
+}
+type AppendEntriesReply struct {
+	//3A
+	Term    int
+	Success bool
+	//
 }
 
-type AppendEntriesReply struct {
+// 接收心跳
+func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *RequestVoteReply) {
+	if args.Term >= rf.maxTerm {
+		rf.mu.Lock()
+		rf.leaderId = args.LeaderId
+		rf.maxTerm = args.Term
+		rf.state = FOLLOWER
+		fmt.Printf("%d get heartbeat from %d,change to follower\n", rf.id, args.LeaderId)
+		rf.mu.Unlock()
+	}
 }
 
 // example RequestVote RPC arguments structure.
@@ -152,26 +174,33 @@ type RequestVoteArgs struct {
 	//3A
 	Term        int //当前的term
 	CandidateId int //当前request来自节点的Id
-
+	//3B
 }
 
 // example RequestVote RPC reply structure.
 // field names must start with capital letters!
 type RequestVoteReply struct {
-	// Your data here (3A).
-	OK   bool //是否收到票
+	// Your data here (3A)
 	Term int  //candtidate的term
+	Id   int  //投票者的id
+	OK   bool //是否收到票
 }
 
 // example RequestVote RPC handler.
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (3A, 3B).
 	//3A
+	if args.CandidateId == rf.id {
+		reply.OK = false
+		return
+	}
 	if args.Term < rf.maxTerm || rf.isVoted {
 		reply.OK = false
 		reply.Term = rf.maxTerm
+		fmt.Printf("%d reject args.Term:%d,rf.Term:%d from %d \n", rf.id, args.Term, rf.maxTerm, args.CandidateId)
 		return
 	}
+	fmt.Printf("%d accept args.Term:%d,rf.Term:%d from %d \n", rf.id, args.Term, rf.maxTerm, args.CandidateId)
 	rf.isVoted = true
 	rf.leaderId = args.CandidateId
 	reply.OK = true
@@ -253,16 +282,73 @@ func (rf *Raft) killed() bool {
 
 func (rf *Raft) ticker() {
 	for rf.killed() == false {
-
 		// Your code here (3A)
-		select {
-		case <-:
-
+		if rf.state == FOLLOWER {
+			select {
+			//超时未接收到Leader的心跳
+			case <-rf.timer.C:
+				//开始选举
+				fmt.Printf("time out %d\n", rf.id)
+				rf.mu.Lock()
+				rf.state = CANDIDATE
+				rf.mu.Unlock()
+				break
+			//收到Leader的心跳
+			case <-rf.hb:
+				//更新计时器
+				rf.mu.Lock()
+				rf.timer = time.NewTimer(300 * time.Millisecond)
+				rf.mu.Unlock()
+				break
+			}
+		} else if rf.state == CANDIDATE {
+			rf.mu.Lock()
+			rf.maxTerm++
+			fmt.Printf("%d change to candidate %d\n", rf.id, rf.maxTerm)
+			rf.leaderId = -1
+			rf.votes = 1
+			rf.isVoted = true
+			args := &RequestVoteArgs{
+				Term:        rf.maxTerm,
+				CandidateId: rf.id,
+			}
+			reply := &RequestVoteReply{}
+			for idx := range rf.peers {
+				rf.peers[idx].Call("Raft.RequestVote", args, reply)
+				if reply.OK {
+					rf.votes++
+				}
+				fmt.Printf("%d now votes: %d from %v\n", rf.id, rf.votes)
+			}
+			if rf.votes >= len(rf.peers)/2+1 {
+				rf.leaderId = rf.id
+				rf.state = LEADER
+				fmt.Printf("%d is leader,get votes:%d \n", rf.id, rf.votes)
+				continue
+			} else {
+				rf.votes = 0
+				rf.isVoted = false
+			}
+			rf.mu.Unlock()
+		} else if rf.state == LEADER {
+			fmt.Printf("%d is Leader,send heartbeat\n", rf.id)
+			for rf.state == LEADER {
+				args := &AppendEntriesArgs{
+					Term:     rf.maxTerm,
+					LeaderId: rf.id,
+				}
+				reply := &AppendEntriesReply{}
+				for idx := range rf.peers {
+					rf.peers[idx].Call("Raft.AppendEntries", args, reply)
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
 		}
 		// Check if a leader election should be started.
 
 		// pause for a random amount of time between 50 and 350
 		// milliseconds.
+		//等待50ms-350ms
 		ms := 50 + (rand.Int63() % 300)
 		time.Sleep(time.Duration(ms) * time.Millisecond)
 	}
@@ -279,20 +365,26 @@ func (rf *Raft) ticker() {
 // for any long-running work.
 func Make(peers []*labrpc.ClientEnd, me int,
 	persister *Persister, applyCh chan ApplyMsg) *Raft {
+
 	rf := &Raft{}
 	rf.peers = peers
 	rf.persister = persister
 	rf.me = me
-
+	rf.timer = time.NewTimer(300 * time.Millisecond)
+	rf.hb = make(chan struct{})
 	// Your initialization code here (3A, 3B, 3C).
 	//3A
+
+	//创建一个peer，id自增
 	rf.id = ID
 	ID++
-	rf.state = CANDIDATE
+	//当前状态为candidate
+	rf.state = FOLLOWER
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
 	// start ticker goroutine to start elections
+	//开始状态机
 	go rf.ticker()
 
 	return rf
