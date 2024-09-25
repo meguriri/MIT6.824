@@ -76,7 +76,6 @@ type Raft struct {
 	isVoted  bool        //当前节点是否已经投票
 	votes    int         //选票数
 	timer    *time.Timer //计时器
-	hb       chan struct{}
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
 
@@ -157,13 +156,18 @@ type AppendEntriesReply struct {
 
 // 接收心跳
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *RequestVoteReply) {
+	if args.LeaderId == rf.id {
+		return
+	}
 	if args.Term >= rf.maxTerm {
-		rf.mu.Lock()
 		rf.leaderId = args.LeaderId
 		rf.maxTerm = args.Term
-		rf.state = FOLLOWER
-		fmt.Printf("%d get heartbeat from %d,change to follower\n", rf.id, args.LeaderId)
-		rf.mu.Unlock()
+		rf.isVoted = false
+		rf.timer.Reset(200 * time.Millisecond)
+		if rf.state == CANDIDATE {
+			rf.state = FOLLOWER
+			fmt.Printf("%d get heartbeat from %d,change to follower\n", rf.id, args.LeaderId)
+		}
 	}
 }
 
@@ -190,8 +194,11 @@ type RequestVoteReply struct {
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (3A, 3B).
 	//3A
+	reply.Id = rf.id
 	if args.CandidateId == rf.id {
+		fmt.Printf("%d reject args.Term:%d,rf.Term:%d from %d same...\n", rf.id, args.Term, rf.maxTerm, args.CandidateId)
 		reply.OK = false
+		reply.Term = rf.maxTerm
 		return
 	}
 	if args.Term < rf.maxTerm || rf.isVoted {
@@ -293,13 +300,6 @@ func (rf *Raft) ticker() {
 				rf.state = CANDIDATE
 				rf.mu.Unlock()
 				break
-			//收到Leader的心跳
-			case <-rf.hb:
-				//更新计时器
-				rf.mu.Lock()
-				rf.timer = time.NewTimer(300 * time.Millisecond)
-				rf.mu.Unlock()
-				break
 			}
 		} else if rf.state == CANDIDATE {
 			rf.mu.Lock()
@@ -308,37 +308,38 @@ func (rf *Raft) ticker() {
 			rf.leaderId = -1
 			rf.votes = 1
 			rf.isVoted = true
-			args := &RequestVoteArgs{
-				Term:        rf.maxTerm,
-				CandidateId: rf.id,
-			}
-			reply := &RequestVoteReply{}
 			for idx := range rf.peers {
+				args := &RequestVoteArgs{
+					Term:        rf.maxTerm,
+					CandidateId: rf.id,
+				}
+				reply := &RequestVoteReply{}
 				rf.peers[idx].Call("Raft.RequestVote", args, reply)
 				if reply.OK {
 					rf.votes++
+					fmt.Printf("%d now votes: %d from %v\n", rf.id, rf.votes, reply.Id)
 				}
-				fmt.Printf("%d now votes: %d from %v\n", rf.id, rf.votes)
 			}
 			if rf.votes >= len(rf.peers)/2+1 {
 				rf.leaderId = rf.id
 				rf.state = LEADER
 				fmt.Printf("%d is leader,get votes:%d \n", rf.id, rf.votes)
 				continue
-			} else {
-				rf.votes = 0
-				rf.isVoted = false
 			}
+			//else {
+			//	rf.votes = 0
+			//	rf.isVoted = false
+			//}
 			rf.mu.Unlock()
 		} else if rf.state == LEADER {
 			fmt.Printf("%d is Leader,send heartbeat\n", rf.id)
 			for rf.state == LEADER {
-				args := &AppendEntriesArgs{
-					Term:     rf.maxTerm,
-					LeaderId: rf.id,
-				}
-				reply := &AppendEntriesReply{}
 				for idx := range rf.peers {
+					args := &AppendEntriesArgs{
+						Term:     rf.maxTerm,
+						LeaderId: rf.id,
+					}
+					reply := &AppendEntriesReply{}
 					rf.peers[idx].Call("Raft.AppendEntries", args, reply)
 				}
 				time.Sleep(10 * time.Millisecond)
@@ -370,8 +371,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.peers = peers
 	rf.persister = persister
 	rf.me = me
-	rf.timer = time.NewTimer(300 * time.Millisecond)
-	rf.hb = make(chan struct{})
+	rf.timer = time.NewTimer(200 * time.Millisecond)
 	// Your initialization code here (3A, 3B, 3C).
 	//3A
 
