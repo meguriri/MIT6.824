@@ -183,6 +183,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if args.Term >= rf.currentTerm {
 		rf.votedFor = args.LeaderId
 		rf.currentTerm = args.Term
+		rf.timer.Reset(rf.voteTimeout * time.Millisecond)
 		if rf.state == CANDIDATE {
 			rf.state = FOLLOWER
 			//fmt.Printf("%d get heartbeat from %d,change to follower\n", rf.me, args.LeaderId)
@@ -331,6 +332,7 @@ func (rf *Raft) ticker() {
 	for rf.killed() == false {
 		select {
 		case <-rf.timer.C:
+			rf.showState()
 			if rf.killed() {
 				return
 			}
@@ -362,6 +364,7 @@ func (rf *Raft) ticker() {
 						reply := &RequestVoteReply{}
 						go rf.sendRequestVote(idx, args, reply)
 					}
+					//fallthrough
 				case LEADER:
 					//fmt.Printf("%d start LEADER\n", rf.me)
 					//每10ms发送1次心跳
@@ -382,9 +385,6 @@ func (rf *Raft) ticker() {
 			}
 			rf.mu.Unlock()
 		}
-		//等待50ms-350ms
-		ms := 50 + (rand.Int63() % 300)
-		time.Sleep(time.Duration(ms) * time.Millisecond)
 	}
 }
 
@@ -446,4 +446,15 @@ func (rf *Raft) Kill() {
 func (rf *Raft) killed() bool {
 	z := atomic.LoadInt32(&rf.dead)
 	return z == 1
+}
+
+func (rf *Raft) showState() {
+	switch rf.state {
+	case FOLLOWER:
+		//fmt.Printf("%d is FOLLOWER\n", rf.me)
+	case CANDIDATE:
+		//fmt.Printf("%d is CANDIDATE\n", rf.me)
+	case LEADER:
+		//fmt.Printf("%d is LEADER\n", rf.me)
+	}
 }
