@@ -18,6 +18,7 @@ package raft
 //
 
 import (
+	"fmt"
 	"math/rand"
 
 	"sync"
@@ -70,6 +71,7 @@ type Raft struct {
 	votes       int         //选票数
 	timer       *time.Timer //计时器
 	voteTimeout time.Duration
+	isLeader    chan struct{}
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
 
@@ -184,11 +186,11 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.votedFor = args.LeaderId
 		rf.currentTerm = args.Term
 		rf.timer.Reset(rf.voteTimeout * time.Millisecond)
-		if rf.state == CANDIDATE {
+		if rf.state == CANDIDATE || rf.state == LEADER {
 			rf.state = FOLLOWER
-			//fmt.Printf("%d get heartbeat from %d,change to follower\n", rf.me, args.LeaderId)
+			fmt.Printf("%d get heartbeat from %d,change to follower\n", rf.me, args.LeaderId)
 		} else {
-			//fmt.Printf("%d get heartbeat from %d\n", rf.me, args.LeaderId)
+			fmt.Printf("%d get heartbeat from %d\n", rf.me, args.LeaderId)
 		}
 	}
 }
@@ -209,24 +211,25 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	//candidate的term小，拒绝投票
 	if args.Term < rf.currentTerm {
 		reply.Term = rf.currentTerm
-		//fmt.Printf("%d reject votes to %d,my term %d,args term %d\n", rf.me, args.CandidateId, rf.currentTerm, args.Term)
+		fmt.Printf("%d reject votes to %d,my term %d,args term %d\n", rf.me, args.CandidateId, rf.currentTerm, args.Term)
 		return
 	}
 	//candidate的term大，转换成追随者
 	if args.Term > rf.currentTerm {
-		//fmt.Printf("%d Term less than %d,my term %d,args term %d\n", rf.me, args.CandidateId, rf.currentTerm, args.Term)
+		fmt.Printf("%d Term less than %d,my term %d,args term %d\n", rf.me, args.CandidateId, rf.currentTerm, args.Term)
 		rf.state = FOLLOWER
 		rf.currentTerm = args.Term
 		rf.votedFor = -1
 	}
 	//未投票,可以投票
 	if rf.votedFor == -1 || rf.votedFor == args.CandidateId {
-		//fmt.Printf("%d send votes to %d\n", rf.me, args.CandidateId)
+		fmt.Printf("%d send votes to %d\n", rf.me, args.CandidateId)
 		rf.votedFor = args.CandidateId
 		reply.VoteGranted = true
 		reply.Term = rf.currentTerm
+		rf.timer.Reset(rf.voteTimeout * time.Millisecond)
 	} else {
-		//fmt.Printf("%d reject votes from %d,votedFor %d\n", rf.me, args.CandidateId, rf.votedFor)
+		fmt.Printf("%d reject votes from %d,votedFor %d\n", rf.me, args.CandidateId, rf.votedFor)
 	}
 	return
 }
@@ -276,12 +279,13 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 	}
 	if reply.VoteGranted {
 		rf.votes++
-		//fmt.Printf("%d now votes: %d from %v\n", rf.me, rf.votes, reply.Id)
+		fmt.Printf("%d now votes: %d from %v\n", rf.me, rf.votes, reply.Id)
 	}
 	if rf.votes > len(rf.peers)/2 && rf.state == CANDIDATE {
-		//fmt.Printf("%d get %d votes,change to leader\n", rf.me, rf.votes)
+		fmt.Printf("%d get %d votes,change to leader\n", rf.me, rf.votes)
 		rf.votes = 0
 		rf.state = LEADER
+		//rf.isLeader <- struct{}{}
 	}
 	return ok
 }
@@ -336,20 +340,24 @@ func (rf *Raft) ticker() {
 			if rf.killed() {
 				return
 			}
-			rf.mu.Lock()
+
 			{
 				switch rf.state {
 				case FOLLOWER:
-					//fmt.Printf("%d timeout,change to candidate\n", rf.me)
+					fmt.Printf("%d timeout,change to candidate\n", rf.me)
+					rf.mu.Lock()
 					rf.state = CANDIDATE
+					rf.mu.Unlock()
 					fallthrough
 				case CANDIDATE:
+					rf.mu.Lock()
 					rf.currentTerm++
 					rf.votes = 1
 					rf.votedFor = rf.me
 					rf.voteTimeout = time.Duration(rand.Int63()%150 + 200)
 					rf.timer.Reset(rf.voteTimeout * time.Millisecond)
-					//fmt.Printf("%d start term %d\n", rf.me, rf.currentTerm)
+					fmt.Printf("%d start term %d\n", rf.me, rf.currentTerm)
+					rf.mu.Unlock()
 					for idx, _ := range rf.peers {
 						if rf.state != CANDIDATE {
 							break
@@ -364,27 +372,52 @@ func (rf *Raft) ticker() {
 						reply := &RequestVoteReply{}
 						go rf.sendRequestVote(idx, args, reply)
 					}
-					//fallthrough
 				case LEADER:
+					rf.leaderTerm()
+					//rf.mu.Lock()
 					//fmt.Printf("%d start LEADER\n", rf.me)
-					//每10ms发送1次心跳
-					rf.timer.Reset(100 * time.Millisecond)
-					for idx, _ := range rf.peers {
-						if idx == rf.me {
-							continue
-						}
-						//fmt.Printf("%d send HeartBeat to %d\n", rf.me, idx)
-						args := &AppendEntriesArgs{
-							Term:     rf.currentTerm,
-							LeaderId: rf.me,
-						}
-						reply := &AppendEntriesReply{}
-						go rf.sendHeartBeat(idx, args, reply)
-					}
+					////每100ms发送1次心跳
+					//rf.timer.Reset(100 * time.Millisecond)
+					//rf.mu.Unlock()
+					//for idx, _ := range rf.peers {
+					//	if idx == rf.me {
+					//		continue
+					//	}
+					//	fmt.Printf("%d send HeartBeat to %d\n", rf.me, idx)
+					//	args := &AppendEntriesArgs{
+					//		Term:     rf.currentTerm,
+					//		LeaderId: rf.me,
+					//	}
+					//	reply := &AppendEntriesReply{}
+					//	go rf.sendHeartBeat(idx, args, reply)
+					//}
 				}
 			}
-			rf.mu.Unlock()
+			//case <-rf.isLeader:
+			//	fmt.Printf("%d case isLeader in\n", rf.me)
+			//	rf.leaderTerm()
+			//	continue
 		}
+	}
+}
+
+func (rf *Raft) leaderTerm() {
+	rf.mu.Lock()
+	fmt.Printf("%d start LEADER\n", rf.me)
+	//每100ms发送1次心跳
+	rf.timer.Reset(100 * time.Millisecond)
+	rf.mu.Unlock()
+	for idx, _ := range rf.peers {
+		if idx == rf.me {
+			continue
+		}
+		fmt.Printf("%d send HeartBeat to %d\n", rf.me, idx)
+		args := &AppendEntriesArgs{
+			Term:     rf.currentTerm,
+			LeaderId: rf.me,
+		}
+		reply := &AppendEntriesReply{}
+		go rf.sendHeartBeat(idx, args, reply)
 	}
 }
 
@@ -410,6 +443,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 		state:       FOLLOWER,
 		votedFor:    -1,
 		votes:       0,
+		isLeader:    make(chan struct{}),
 	}
 	rf.voteTimeout = time.Duration(rand.Int63()%150 + 200)
 	rf.timer = time.NewTimer(rf.voteTimeout * time.Millisecond)
@@ -451,10 +485,10 @@ func (rf *Raft) killed() bool {
 func (rf *Raft) showState() {
 	switch rf.state {
 	case FOLLOWER:
-		//fmt.Printf("%d is FOLLOWER\n", rf.me)
+		fmt.Printf("%d is FOLLOWER\n", rf.me)
 	case CANDIDATE:
-		//fmt.Printf("%d is CANDIDATE\n", rf.me)
+		fmt.Printf("%d is CANDIDATE\n", rf.me)
 	case LEADER:
-		//fmt.Printf("%d is LEADER\n", rf.me)
+		fmt.Printf("%d is LEADER\n", rf.me)
 	}
 }
