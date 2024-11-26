@@ -18,6 +18,7 @@ package raft
 //
 
 import (
+	"fmt"
 	"math/rand"
 
 	"sync"
@@ -207,6 +208,29 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		} else {
 			//fmt.Printf("%d get heartbeat from %d\n", rf.me, args.LeaderId)
 		}
+		fmt.Printf("[follower %d] get entries from %d,preLogIndex:%d,preLogTerm:%d,rf.log:%v;", rf.me, args.LeaderId, args.PreLogIndex, args.PreLogTerm, rf.log)
+		if args.PreLogIndex == len(rf.log)-1 {
+			if args.PreLogTerm != rf.log[len(rf.log)-1].Term {
+				fmt.Printf("need remove and not match\n")
+				rf.log = rf.log[:len(rf.log)-1]
+				reply.Success = false
+				return
+			}
+			fmt.Printf("match;")
+			reply.Success = true
+			for idx := range args.Entries {
+				rf.log = append(rf.log, args.Entries[idx])
+			}
+			fmt.Printf("%v\n", rf.log)
+			if args.LeadCommit > rf.commitIndex {
+				rf.commitIndex = min(args.LeadCommit, len(rf.log)-1)
+			}
+		}
+		if !reply.Success {
+			fmt.Printf("not match\n")
+		} else {
+			fmt.Printf("\n")
+		}
 	}
 }
 
@@ -304,6 +328,10 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 		//fmt.Printf("%d get %d votes,change to leader\n", rf.me, rf.votes)
 		rf.votes = 0
 		rf.state = LEADER
+		for idx := range rf.nextIndex {
+			rf.nextIndex[idx] = len(rf.log)
+			rf.matchIndex[idx] = 0
+		}
 		//rf.isLeader <- struct{}{}
 	}
 	return ok
@@ -314,17 +342,25 @@ func (rf *Raft) sendHeartBeat(server int, args *AppendEntriesArgs, reply *Append
 		return false
 	}
 	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
-	for !ok {
-		if rf.killed() {
-			return false
-		}
-		ok = rf.peers[server].Call("Raft.AppendEntries", args, reply)
-	}
+	// for !ok {
+	// 	if rf.killed() {
+	// 		return false
+	// 	}
+	// 	ok = rf.peers[server].Call("Raft.AppendEntries", args, reply)
+	// }
 	//leader发现当前的term已经比自己的大，转变为follower
 	if reply.Term > rf.currentTerm {
 		rf.currentTerm = reply.Term
 		rf.state = FOLLOWER
 		rf.votedFor = -1
+	}
+	if !ok {
+		rf.nextIndex[server]--
+		fmt.Printf("[leader %d] appendEntries fail,%d\n", rf.me, rf.nextIndex[server])
+	} else {
+		rf.nextIndex[server] = rf.nextIndex[rf.me]
+		rf.matchIndex[server] = rf.nextIndex[rf.me] - 1
+		fmt.Printf("[leader %d] appendEntries success,%d\n", rf.me, rf.nextIndex[server])
 	}
 	return ok
 }
@@ -353,7 +389,10 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		Term:    rf.currentTerm,
 		Command: command,
 	}
+	fmt.Println("[client] send command", ent)
 	rf.log = append(rf.log, ent)
+	rf.nextIndex[rf.me]++
+	rf.matchIndex[rf.me]++
 	return len(rf.log) - 1, rf.log[len(rf.log)-1].Term, true
 }
 
@@ -393,7 +432,7 @@ func (rf *Raft) ticker() {
 						args := &RequestVoteArgs{
 							Term:         rf.currentTerm,
 							CandidateId:  rf.me,
-							LastLogIndex: len(rf.log),
+							LastLogIndex: len(rf.log) - 1,
 							LastLogTerm:  rf.log[len(rf.log)-1].Term,
 						}
 						reply := &RequestVoteReply{}
@@ -440,7 +479,7 @@ func (rf *Raft) leaderTerm() {
 		}
 		//fmt.Printf("%d send HeartBeat to %d\n", rf.me, idx)
 		entries := make([]Entry, 0)
-		for i := rf.nextIndex[idx] - 1; i < len(rf.log); i++ {
+		for i := rf.nextIndex[idx]; i < len(rf.log); i++ {
 			entries = append(entries, rf.log[i])
 		}
 		args := &AppendEntriesArgs{
@@ -451,8 +490,11 @@ func (rf *Raft) leaderTerm() {
 			Entries:     entries,
 			LeadCommit:  rf.commitIndex,
 		}
+		fmt.Printf("[leader %d] send entries to %d: preLogIndex:%d,preLogTerm:%d,entries:%v\n", rf.me, idx, args.PreLogIndex, args.PreLogTerm, args.Entries)
 		reply := &AppendEntriesReply{}
 		go rf.sendHeartBeat(idx, args, reply)
+		// TODO(meguriri): check commit
+
 	}
 }
 
@@ -535,4 +577,11 @@ func (rf *Raft) showState() {
 	case LEADER:
 		//fmt.Printf("%d is LEADER\n", rf.me)
 	}
+}
+
+func min(i, j int) int {
+	if i < j {
+		return i
+	}
+	return j
 }
