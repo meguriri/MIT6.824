@@ -8,17 +8,16 @@ package raft
 // rf = Make(...)
 //   create a new Raft server.
 // rf.Start(command interface{}) (index, term, isleader)
-//   start agreement on a new log entry
+//   start agreement on a new log Entry
 // rf.GetState() (term, isLeader)
 //   ask a Raft for its current term, and whether it thinks it is leader
 // ApplyMsg
-//   each time a new entry is committed to the log, each Raft peer
+//   each time a new Entry is committed to the log, each Raft peer
 //   should send an ApplyMsg to the service (or tester)
 //   in the same server.
 //
 
 import (
-	"fmt"
 	"math/rand"
 
 	"sync"
@@ -38,7 +37,7 @@ const (
 // committed, the peer should send an ApplyMsg to the service (or
 // tester) on the same server, via the applyCh passed to Make(). set
 // CommandValid to true to indicate that the ApplyMsg contains a newly
-// committed log entry.
+// committed log Entry.
 //
 // in part 3D you'll want to send other kinds of messages (e.g.,
 // snapshots) on the applyCh, but set CommandValid to false for these
@@ -53,6 +52,11 @@ type ApplyMsg struct {
 	Snapshot      []byte
 	SnapshotTerm  int
 	SnapshotIndex int
+}
+
+type Entry struct {
+	Term    int
+	Command interface{}
 }
 
 // A Go object implementing a single Raft peer.
@@ -72,6 +76,12 @@ type Raft struct {
 	timer       *time.Timer //计时器
 	voteTimeout time.Duration
 	isLeader    chan struct{}
+	//3B
+	log         []Entry
+	commitIndex int
+	lastApplied int
+	nextIndex   []int
+	matchIndex  []int
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
 
@@ -146,6 +156,8 @@ type RequestVoteArgs struct {
 	Term        int //当前的term
 	CandidateId int //当前request来自节点的Id
 	//3B
+	LastLogIndex int
+	LastLogTerm  int
 }
 
 // example RequestVote RPC reply structure.
@@ -162,13 +174,16 @@ type AppendEntriesArgs struct {
 	//3A
 	Term     int //leader's term
 	LeaderId int
-	//
+	//3B
+	PreLogIndex int
+	PreLogTerm  int
+	Entries     []Entry
+	LeadCommit  int
 }
 type AppendEntriesReply struct {
 	//3A
 	Term    int
 	Success bool
-	//
 }
 
 // 接收心跳
@@ -188,9 +203,9 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.timer.Reset(rf.voteTimeout * time.Millisecond)
 		if rf.state == CANDIDATE || rf.state == LEADER {
 			rf.state = FOLLOWER
-			fmt.Printf("%d get heartbeat from %d,change to follower\n", rf.me, args.LeaderId)
+			//fmt.Printf("%d get heartbeat from %d,change to follower\n", rf.me, args.LeaderId)
 		} else {
-			fmt.Printf("%d get heartbeat from %d\n", rf.me, args.LeaderId)
+			//fmt.Printf("%d get heartbeat from %d\n", rf.me, args.LeaderId)
 		}
 	}
 }
@@ -198,7 +213,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 // example RequestVote RPC handler.
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (3A, 3B).
-	//3A
 	if rf.killed() {
 		reply.Term = -1
 		reply.VoteGranted = false
@@ -211,27 +225,32 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	//candidate的term小，拒绝投票
 	if args.Term < rf.currentTerm {
 		reply.Term = rf.currentTerm
-		fmt.Printf("%d reject votes to %d,my term %d,args term %d\n", rf.me, args.CandidateId, rf.currentTerm, args.Term)
+		//fmt.Printf("%d reject votes to %d,my term %d,args term %d\n", rf.me, args.CandidateId, rf.currentTerm, args.Term)
+		return
+	}
+	//candidate的日志不够新
+	if args.LastLogTerm < rf.log[len(rf.log)-1].Term ||
+		(args.LastLogTerm == rf.log[len(rf.log)-1].Term && args.LastLogIndex < len(rf.log)-1) {
+		reply.Term = rf.currentTerm
 		return
 	}
 	//candidate的term大，转换成追随者
 	if args.Term > rf.currentTerm {
-		fmt.Printf("%d Term less than %d,my term %d,args term %d\n", rf.me, args.CandidateId, rf.currentTerm, args.Term)
+		//fmt.Printf("%d Term less than %d,my term %d,args term %d\n", rf.me, args.CandidateId, rf.currentTerm, args.Term)
 		rf.state = FOLLOWER
 		rf.currentTerm = args.Term
 		rf.votedFor = -1
 	}
 	//未投票,可以投票
 	if rf.votedFor == -1 || rf.votedFor == args.CandidateId {
-		fmt.Printf("%d send votes to %d\n", rf.me, args.CandidateId)
+		//fmt.Printf("%d send votes to %d\n", rf.me, args.CandidateId)
 		rf.votedFor = args.CandidateId
 		reply.VoteGranted = true
 		reply.Term = rf.currentTerm
 		rf.timer.Reset(rf.voteTimeout * time.Millisecond)
 	} else {
-		fmt.Printf("%d reject votes from %d,votedFor %d\n", rf.me, args.CandidateId, rf.votedFor)
+		//fmt.Printf("%d reject votes from %d,votedFor %d\n", rf.me, args.CandidateId, rf.votedFor)
 	}
-	return
 }
 
 // example code to send a RequestVote RPC to a server.
@@ -279,10 +298,10 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 	}
 	if reply.VoteGranted {
 		rf.votes++
-		fmt.Printf("%d now votes: %d from %v\n", rf.me, rf.votes, reply.Id)
+		//fmt.Printf("%d now votes: %d from %v\n", rf.me, rf.votes, reply.Id)
 	}
 	if rf.votes > len(rf.peers)/2 && rf.state == CANDIDATE {
-		fmt.Printf("%d get %d votes,change to leader\n", rf.me, rf.votes)
+		//fmt.Printf("%d get %d votes,change to leader\n", rf.me, rf.votes)
 		rf.votes = 0
 		rf.state = LEADER
 		//rf.isLeader <- struct{}{}
@@ -323,17 +342,23 @@ func (rf *Raft) sendHeartBeat(server int, args *AppendEntriesArgs, reply *Append
 // term. the third return value is true if this server believes it is
 // the leader.
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
-	index := -1
-	term := -1
-	isLeader := true
-
 	// Your code here (3B).
-
-	return index, term, isLeader
+	if rf.killed() {
+		return -1, -1, false
+	}
+	if rf.state != LEADER {
+		return -1, -1, false
+	}
+	ent := Entry{
+		Term:    rf.currentTerm,
+		Command: command,
+	}
+	rf.log = append(rf.log, ent)
+	return len(rf.log) - 1, rf.log[len(rf.log)-1].Term, true
 }
 
 func (rf *Raft) ticker() {
-	for rf.killed() == false {
+	for !rf.killed() {
 		select {
 		case <-rf.timer.C:
 			rf.showState()
@@ -344,7 +369,7 @@ func (rf *Raft) ticker() {
 			{
 				switch rf.state {
 				case FOLLOWER:
-					fmt.Printf("%d timeout,change to candidate\n", rf.me)
+					//fmt.Printf("%d timeout,change to candidate\n", rf.me)
 					rf.mu.Lock()
 					rf.state = CANDIDATE
 					rf.mu.Unlock()
@@ -356,9 +381,9 @@ func (rf *Raft) ticker() {
 					rf.votedFor = rf.me
 					rf.voteTimeout = time.Duration(rand.Int63()%150 + 200)
 					rf.timer.Reset(rf.voteTimeout * time.Millisecond)
-					fmt.Printf("%d start term %d\n", rf.me, rf.currentTerm)
+					//fmt.Printf("%d start term %d\n", rf.me, rf.currentTerm)
 					rf.mu.Unlock()
-					for idx, _ := range rf.peers {
+					for idx := range rf.peers {
 						if rf.state != CANDIDATE {
 							break
 						}
@@ -366,8 +391,10 @@ func (rf *Raft) ticker() {
 							continue
 						}
 						args := &RequestVoteArgs{
-							Term:        rf.currentTerm,
-							CandidateId: rf.me,
+							Term:         rf.currentTerm,
+							CandidateId:  rf.me,
+							LastLogIndex: len(rf.log),
+							LastLogTerm:  rf.log[len(rf.log)-1].Term,
 						}
 						reply := &RequestVoteReply{}
 						go rf.sendRequestVote(idx, args, reply)
@@ -375,7 +402,7 @@ func (rf *Raft) ticker() {
 				case LEADER:
 					rf.leaderTerm()
 					//rf.mu.Lock()
-					//fmt.Printf("%d start LEADER\n", rf.me)
+					////fmt.Printf("%d start LEADER\n", rf.me)
 					////每100ms发送1次心跳
 					//rf.timer.Reset(100 * time.Millisecond)
 					//rf.mu.Unlock()
@@ -383,7 +410,7 @@ func (rf *Raft) ticker() {
 					//	if idx == rf.me {
 					//		continue
 					//	}
-					//	fmt.Printf("%d send HeartBeat to %d\n", rf.me, idx)
+					//	//fmt.Printf("%d send HeartBeat to %d\n", rf.me, idx)
 					//	args := &AppendEntriesArgs{
 					//		Term:     rf.currentTerm,
 					//		LeaderId: rf.me,
@@ -394,7 +421,7 @@ func (rf *Raft) ticker() {
 				}
 			}
 			//case <-rf.isLeader:
-			//	fmt.Printf("%d case isLeader in\n", rf.me)
+			//	//fmt.Printf("%d case isLeader in\n", rf.me)
 			//	rf.leaderTerm()
 			//	continue
 		}
@@ -403,18 +430,26 @@ func (rf *Raft) ticker() {
 
 func (rf *Raft) leaderTerm() {
 	rf.mu.Lock()
-	fmt.Printf("%d start LEADER\n", rf.me)
+	//fmt.Printf("%d start LEADER\n", rf.me)
 	//每100ms发送1次心跳
 	rf.timer.Reset(100 * time.Millisecond)
 	rf.mu.Unlock()
-	for idx, _ := range rf.peers {
+	for idx := range rf.peers {
 		if idx == rf.me {
 			continue
 		}
-		fmt.Printf("%d send HeartBeat to %d\n", rf.me, idx)
+		//fmt.Printf("%d send HeartBeat to %d\n", rf.me, idx)
+		entries := make([]Entry, 0)
+		for i := rf.nextIndex[idx] - 1; i < len(rf.log); i++ {
+			entries = append(entries, rf.log[i])
+		}
 		args := &AppendEntriesArgs{
-			Term:     rf.currentTerm,
-			LeaderId: rf.me,
+			Term:        rf.currentTerm,
+			LeaderId:    rf.me,
+			PreLogIndex: rf.nextIndex[idx] - 1,
+			PreLogTerm:  rf.log[rf.nextIndex[idx]-1].Term,
+			Entries:     entries,
+			LeadCommit:  rf.commitIndex,
 		}
 		reply := &AppendEntriesReply{}
 		go rf.sendHeartBeat(idx, args, reply)
@@ -444,7 +479,16 @@ func Make(peers []*labrpc.ClientEnd, me int,
 		votedFor:    -1,
 		votes:       0,
 		isLeader:    make(chan struct{}),
+		log:         make([]Entry, 0),
+		commitIndex: 0,
+		lastApplied: 0,
+		nextIndex:   make([]int, len(peers)),
+		matchIndex:  make([]int, len(peers)),
 	}
+	for idx := range rf.nextIndex {
+		rf.nextIndex[idx] = 1
+	}
+	rf.log = append(rf.log, Entry{Term: 0, Command: nil})
 	rf.voteTimeout = time.Duration(rand.Int63()%150 + 200)
 	rf.timer = time.NewTimer(rf.voteTimeout * time.Millisecond)
 
@@ -485,10 +529,10 @@ func (rf *Raft) killed() bool {
 func (rf *Raft) showState() {
 	switch rf.state {
 	case FOLLOWER:
-		fmt.Printf("%d is FOLLOWER\n", rf.me)
+		//fmt.Printf("%d is FOLLOWER\n", rf.me)
 	case CANDIDATE:
-		fmt.Printf("%d is CANDIDATE\n", rf.me)
+		//fmt.Printf("%d is CANDIDATE\n", rf.me)
 	case LEADER:
-		fmt.Printf("%d is LEADER\n", rf.me)
+		//fmt.Printf("%d is LEADER\n", rf.me)
 	}
 }
