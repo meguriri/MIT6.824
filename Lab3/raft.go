@@ -221,9 +221,12 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			for idx := range args.Entries {
 				rf.log = append(rf.log, args.Entries[idx])
 			}
-			fmt.Printf("%v\n", rf.log)
+			fmt.Printf("%v;", rf.log)
 			if args.LeadCommit > rf.commitIndex {
 				rf.commitIndex = min(args.LeadCommit, len(rf.log)-1)
+				fmt.Printf("commitIndex:%d\n", rf.commitIndex)
+			} else {
+				fmt.Printf("\n")
 			}
 		}
 		if !reply.Success {
@@ -493,8 +496,19 @@ func (rf *Raft) leaderTerm() {
 		fmt.Printf("[leader %d] send entries to %d: preLogIndex:%d,preLogTerm:%d,entries:%v\n", rf.me, idx, args.PreLogIndex, args.PreLogTerm, args.Entries)
 		reply := &AppendEntriesReply{}
 		go rf.sendHeartBeat(idx, args, reply)
-		// TODO(meguriri): check commit
-
+	}
+	// TODO(meguriri): check commit
+	cnt := make(map[int]int)
+	for _, v := range rf.matchIndex {
+		cnt[v]++
+	}
+	for k, v := range cnt {
+		if v > len(rf.peers)/2+1 {
+			rf.mu.Lock()
+			rf.commitIndex = k
+			fmt.Printf("[leader %d] change commitIndex to %d\n", rf.me, rf.commitIndex)
+			rf.mu.Unlock()
+		}
 	}
 }
 
